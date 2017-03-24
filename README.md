@@ -1,2 +1,3 @@
 # blog
-a blog written by md files for recording what I learned.
+
+a blog written with md files for recording what I learned.
