@@ -124,4 +124,126 @@ public class PeriodicJobService extends JobService {
 
 ## How to prevent app auto start
 
+You may consider to prevent app auto start behavior if you are a platform developer who cares the performance of the system. According to the way that the app used to auto start, you can take steps to prevent it process be bring up.
+
+### Prevent start process by Broadcast
+
+Just stop start process when deliver broadcast to receives.
+
+```
+// frameworks/base/services/core/java/com/android/server/am/BroadcastQueue.java
+
+final void processNextBroadcast(boolean fromMsg) {
+    ......
+
+    // TODO: prevent process start up here if needed
+    if (shouldPreventStartProcess(info, r)) {
+        return;
+    }
+
+    if ((r.curApp=mService.startProcessLocked(targetProcess,
+                    info.activityInfo.applicationInfo, true,
+                    r.intent.getFlags() | Intent.FLAG_FROM_BACKGROUND,
+                    "broadcast", r.curComponent,
+                    (r.intent.getFlags()&Intent.FLAG_RECEIVER_BOOT_UPGRADE) != 0, false, false))
+                            == null) {
+                ......
+            }
+
+            mPendingBroadcast = r;
+            mPendingBroadcastRecvIndex = recIdx;
+        }
+}
+
+private shouldPreventStartProcess(ResolveInfo info, BroadcastRecord r) {
+    boolean stop = false;
+
+    // TODO: make your decision here
+
+    // the following lines is important to make broadcast work properly
+    if (stop) {
+        r.queue.logBroadcastReceiverDiscardLocked(r);
+        r.queue.finishReceiverLocked(r, r.resultCode, r.resultData, r.resultExtras,
+                r.resultAbort, true);
+        r.queue.scheduleBroadcastsLocked();
+        r.state = BroadcastRecord.IDLE;
+    }
+
+    return stop;
+}
+```
+
+### Prevent start process by JobServiceContext
+
+Start process for bringing up service has two major ways, you can call `startService(...)` or `bindService(...)`. Our JobService use the later. The difficulty is how to distinguish this bindService call if from JobServiceContext but not normal usages.
+
+All service start by JobServiceContext should extend from `JobService`, this give us a chance to stop that process being startup in `ActiveServices.bringUpServiceLocked(...)`. But here we choose another way to accomplish our goal.
+
+```
+// frameworks/base/services/core/java/com/android/server/job/JobServiceContext.java
+
+boolean executeRunnableJob(JobStatus job) {
+    synchronized(mLock) {
+        ......
+        final Intent intent = new Intent().setComponent(job.getServiceComponent());
+                boolean binding = mContext.bindServiceAsUser(intent, this,
+                        Context.BIND_AUTO_CREATE | Context.BIND_NOT_FOREGROUND,
+                        new UserHandle(job.getUserId()));
+        // TODO: we add a extra indicator to the intent, and we use it in ActiveService
+        intent.putExtra("extra_from_jobservice", true);
+        ......
+    }
+}
+
+// frameworks/base/services/core/java/com/android/server/am/ActiveServices.java
+
+int bindServiceLocked(IApplicationThread caller, IBinder token, Intent service,
+        String resolvedType, IServiceConnection connection, int flags,
+        String callingPackage, int userId) throws TransactionTooLargeException {
+    ......
+    if ((flags&Context.BIND_AUTO_CREATE) != 0) {
+        s.lastActivity = SystemClock.uptimeMillis();
+
+        // TODO: get our indicator here, and pass to bringUpServiceLocked(...)
+        boolean fromJobService = service.getBooleanExtra("extra_from_jobservice", false);
+        if (bringUpServiceLocked(s, service.getFlags(), callerFg, false, fromJobService) != null) {
+            return 0;
+        }
+    }
+    ......
+}
+
+private final String bringUpServiceLocked(ServiceRecord r, int intentFlags, boolean execInFg,
+         boolean whileRestarting) throws TransactionTooLargeException {
+    return bringUpServiceLocked(r, intentFlags, execInFg, whileRestarting, false);
+}
+
+private final String bringUpServiceLocked(ServiceRecord r, int intentFlags, boolean execInFg,
+        boolean whileRestarting, boolean fromJobService) throws TransactionTooLargeException {
+    ......
+    // Not running -- get it started, and enqueue this service record
+    // to be executed when the app comes up.
+    if (app == null) {
+        // TODO: prevent process startup here
+        if (fromJobService) {
+            String msg = "Unable to launch app "
+                    + r.appInfo.packageName + "/"
+                    + r.appInfo.uid + " for service "
+                    + r.intent.getIntent() + ": from job service";
+            Slog.w("chenwei_as", msg);
+            bringDownServiceLocked(r);
+            return msg;
+        }
+        if ((app=mAm.startProcessLocked(procName, r.appInfo, true, intentFlags,
+                "service", r.name, false, isolated, false)) == null) {
+            ......
+        }
+        ......
+    }
+    ......
+}
+```
+
+> Note: The implementation of the aforementioned ways to prevent start process is ugly, but the principle is correct I think. Our goal is to stop process startup cause by receivers or services.
+
 [Job API]: https://developer.android.com/reference/android/app/job/package-summary.html
